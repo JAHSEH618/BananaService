@@ -85,6 +85,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # ============ 数据模型 ============
 class GenerateImageRequest(BaseModel):
     prompt: str
+    image_base64: Optional[str] = None  # 输入图片 (base64 编码)
     model: str = "gemini-3-pro-image-preview"
     aspect_ratio: Optional[str] = None
     number_of_images: int = 1
@@ -114,17 +115,36 @@ async def generate_image(request: Request, body: GenerateImageRequest):
     生成图像接口
     
     - **prompt**: 图像描述文本
+    - **image_base64**: 输入图片 (可选, base64 编码)
     - **model**: 使用的模型名称
     - **number_of_images**: 生成图像数量
     """
-    logger.info(f"收到生成请求: prompt='{body.prompt[:50]}...', model={body.model}")
+    has_image = body.image_base64 is not None
+    logger.info(f"收到生成请求: prompt='{body.prompt[:50]}...', model={body.model}, has_image={has_image}")
     
     try:
         # 构建请求内容
+        parts = [types.Part.from_text(text=body.prompt)]
+        
+        # 如果有输入图片，添加图片 Part
+        if body.image_base64:
+            # 解析 base64 数据 (支持 data:image/xxx;base64,xxx 格式)
+            image_data = body.image_base64
+            if 'base64,' in image_data:
+                image_data = image_data.split('base64,')[1]
+            
+            image_bytes = base64.b64decode(image_data)
+            parts.append(
+                types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type="image/jpeg"  # 默认 JPEG，也支持 PNG
+                )
+            )
+        
         contents = [
             types.Content(
                 role="user",
-                parts=[types.Part.from_text(text=body.prompt)],
+                parts=parts,
             ),
         ]
 
