@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: banana-service
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - WORKERS=4
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G

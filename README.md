@@ -72,6 +72,20 @@ cp .env.example .env
 | `./restart.sh` | 重启服务 |
 | `./run.sh` | 开发模式 (前台运行，支持热重载) |
 
+### Docker 部署
+
+```bash
+# 1. 构建镜像
+docker build -t banana-service .
+
+# 2. 运行容器
+docker run -d --name banana-service -p 8000:8000 --env-file .env banana-service
+
+# 或者使用 Docker Compose
+docker-compose up -d
+```
+
+
 ### API 接口
 
 #### 健康检查
@@ -208,6 +222,20 @@ cp .env.example .env
 | `./stop.sh` | Stop service |
 | `./restart.sh` | Restart service |
 | `./run.sh` | Development mode (foreground, hot reload) |
+
+### Docker Deployment
+
+```bash
+# 1. Build image
+docker build -t banana-service .
+
+# 2. Run container
+docker run -d --name banana-service -p 8000:8000 --env-file .env banana-service
+
+# Or use Docker Compose
+docker-compose up -d
+```
+
 
 ### API Endpoints
 
