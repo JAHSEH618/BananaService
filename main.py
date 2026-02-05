@@ -37,35 +37,20 @@ _genai_client: Optional[genai.Client] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理：启动时初始化连接池，关闭时清理资源"""
-    global _http_client, _genai_client
+    """应用生命周期管理：启动时初始化，关闭时清理资源"""
+    global _genai_client
     
     # 启动时初始化
-    logger.info("正在初始化连接池...")
+    logger.info("正在初始化 Gemini 客户端...")
     
-    # 创建带连接池的 httpx 客户端
-    _http_client = httpx.AsyncClient(
-        limits=httpx.Limits(
-            max_connections=settings.max_connections,
-            max_keepalive_connections=settings.max_keepalive_connections,
-        ),
-        timeout=httpx.Timeout(settings.request_timeout_seconds),
-    )
+    # 初始化 Gemini 客户端 (SDK 内部管理连接池)
+    _genai_client = genai.Client(api_key=settings.gemini_api_key)
     
-    # 初始化 Gemini 客户端
-    _genai_client = genai.Client(
-        api_key=settings.gemini_api_key,
-        http_options={"client": _http_client}
-    )
-    
-    logger.info(f"服务已启动 - 最大连接数: {settings.max_connections}, 超时: {settings.request_timeout_seconds}s")
+    logger.info(f"服务已启动 - 超时: {settings.request_timeout_seconds}s, 速率限制: {settings.rate_limit_per_minute}/min")
     
     yield
     
-    # 关闭时清理资源
-    logger.info("正在关闭连接池...")
-    if _http_client:
-        await _http_client.aclose()
+    # 关闭时清理
     logger.info("服务已关闭")
 
 
