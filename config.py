@@ -8,6 +8,9 @@ class Settings(BaseSettings):
     # Gemini API
     gemini_api_key: str = ""
     
+    # 服务 API Key (调用接口时需要提供此密钥)
+    service_api_key: str = ""
+    
     # 性能配置
     request_timeout_seconds: int = 120  # 生图请求超时时间
     max_connections: int = 100  # 最大连接数

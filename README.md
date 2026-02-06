@@ -36,6 +36,7 @@ BananaService/
 ### 功能特性
 
 - ✅ **文本/图片输入**: 支持纯文本或图片+文本混合输入
+- ✅ **API Key 认证**: 通过 X-API-Key 请求头进行接口认证
 - ✅ **高并发**: 异步架构 + 多 Worker 模式
 - ✅ **连接池**: httpx 连接复用 (100 连接)
 - ✅ **速率限制**: 60 次/分钟
@@ -104,6 +105,7 @@ curl http://127.0.0.1:8000/health
 ```bash
 curl -X POST http://127.0.0.1:8000/generate \
      -H "Content-Type: application/json" \
+     -H "X-API-Key: YOUR_SERVICE_API_KEY" \
      -d '{
            "prompt": "一只穿着宇航服的香蕉"
          }'
@@ -114,6 +116,7 @@ curl -X POST http://127.0.0.1:8000/generate \
 ```bash
 curl -X POST http://127.0.0.1:8000/generate \
      -H "Content-Type: application/json" \
+     -H "X-API-Key: YOUR_SERVICE_API_KEY" \
      -d '{
            "prompt": "根据这张图片生成一个变体",
            "image_base64": "data:image/jpeg;base64,/9j/4AAQ..."
@@ -144,6 +147,7 @@ curl -X POST http://127.0.0.1:8000/generate \
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `GEMINI_API_KEY` | - | Gemini API 密钥 (必填) |
+| `SERVICE_API_KEY` | - | 服务 API Key (用于接口认证) |
 | `REQUEST_TIMEOUT_SECONDS` | 120 | 请求超时 (秒) |
 | `MAX_CONNECTIONS` | 100 | 最大连接数 |
 | `RATE_LIMIT_PER_MINUTE` | 60 | 每分钟请求限制 |
@@ -187,6 +191,7 @@ BananaService/
 ### Features
 
 - ✅ **Text/Image Input**: Support pure text or image+text hybrid input
+- ✅ **API Key Authentication**: Interface authentication via X-API-Key header
 - ✅ **High Concurrency**: Async architecture + multi-worker mode
 - ✅ **Connection Pooling**: httpx connection reuse (100 connections)
 - ✅ **Rate Limiting**: 60 requests/minute
@@ -255,6 +260,7 @@ curl http://127.0.0.1:8000/health
 ```bash
 curl -X POST http://127.0.0.1:8000/generate \
      -H "Content-Type: application/json" \
+     -H "X-API-Key: YOUR_SERVICE_API_KEY" \
      -d '{
            "prompt": "A banana wearing a spacesuit"
          }'
@@ -265,6 +271,7 @@ curl -X POST http://127.0.0.1:8000/generate \
 ```bash
 curl -X POST http://127.0.0.1:8000/generate \
      -H "Content-Type: application/json" \
+     -H "X-API-Key: YOUR_SERVICE_API_KEY" \
      -d '{
            "prompt": "Generate a variant based on this image",
            "image_base64": "data:image/jpeg;base64,/9j/4AAQ..."
@@ -295,6 +302,7 @@ Edit `.env` file:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `GEMINI_API_KEY` | - | Gemini API key (required) |
+| `SERVICE_API_KEY` | - | Service API key (for interface authentication) |
 | `REQUEST_TIMEOUT_SECONDS` | 120 | Request timeout (seconds) |
 | `MAX_CONNECTIONS` | 100 | Max connections |
 | `RATE_LIMIT_PER_MINUTE` | 60 | Requests per minute limit |

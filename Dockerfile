@@ -27,4 +27,5 @@ EXPOSE 8000
 
 # 启动命令 (使用 shell 形式以支持变量扩展，但 exec 形式更好，这里直接用 CMD)
 # 生产环境建议使用 gunicorn 管理 uvicorn，或者直接使用 uvicorn workers
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+# 启动命令 (使用 python 直接启动以确保配置一致性)
+CMD ["python", "main.py"]

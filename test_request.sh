@@ -4,6 +4,7 @@
 echo "测试 1: 纯文本生成 / Test 1: Text-only generation"
 curl -X POST "http://127.0.0.1:8000/generate" \
      -H "Content-Type: application/json" \
+     -H "X-API-Key: lu8SQbthZTNkaGCx-woNkHZjZS5XfrKk3Xva53xHM7k" \
      -d '{
            "prompt": "一只穿着宇航服的香蕉 / A banana wearing a spacesuit"
          }'

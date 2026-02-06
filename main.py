@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -86,6 +86,29 @@ class HealthResponse(BaseModel):
     version: str
 
 
+# ============ API Key 认证 ============
+async def verify_api_key(x_api_key: str = Header(..., description="API 密钥")):
+    """
+    验证 API Key
+    需要在请求头中提供 X-API-Key
+    """
+    if not settings.service_api_key:
+        logger.error("服务未配置 SERVICE_API_KEY")
+        raise HTTPException(
+            status_code=500,
+            detail="服务配置错误：未配置 API Key"
+        )
+    
+    if x_api_key != settings.service_api_key:
+        logger.warning(f"无效的 API Key: {x_api_key[:8]}...")
+        raise HTTPException(
+            status_code=401,
+            detail="无效的 API Key",
+            headers={"WWW-Authenticate": "ApiKey"}
+        )
+    return x_api_key
+
+
 # ============ API 端点 ============
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -95,7 +118,11 @@ async def health_check():
 
 @app.post("/generate", response_model=ImageResponse)
 @limiter.limit(f"{settings.rate_limit_per_minute}/minute")
-async def generate_image(request: Request, body: GenerateImageRequest):
+async def generate_image(
+    request: Request, 
+    body: GenerateImageRequest,
+    api_key: str = Depends(verify_api_key)
+):
     """
     生成图像接口
     
@@ -182,7 +209,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "main:app",
-        host=settings.host,
+        host="0.0.0.0",  # 强制绑定 0.0.0.0 以支持容器/外部访问
         port=settings.port,
         workers=settings.workers,
         reload=False  # 生产环境关闭热重载
