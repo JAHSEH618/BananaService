@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import logging
+import mimetypes
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
@@ -30,8 +31,6 @@ settings = get_settings()
 limiter = Limiter(key_func=get_remote_address)
 
 # ============ 全局客户端 ============
-# 使用 httpx.AsyncClient 配置连接池
-_http_client: Optional[httpx.AsyncClient] = None
 _genai_client: Optional[genai.Client] = None
 
 
@@ -73,13 +72,12 @@ class GenerateImageRequest(BaseModel):
     image_base64: Optional[str] = None  # 输入图片 (base64 编码)
     model: str = "gemini-3.1-flash-image-preview"
     aspect_ratio: Optional[str] = None
-    number_of_images: int = 1
     person_generation: Optional[str] = None  # 例如 "ALLOW_ADULT"
-    thinking_level: Optional[str] = None  # 例如 "HIGH"
 
 
 class ImageResponse(BaseModel):
     images: List[str]  # Base64 编码的图像列表
+    text: Optional[str] = None  # 模型返回的文本 (如有)
     metadata: Optional[dict] = None
 
 
@@ -131,33 +129,43 @@ async def generate_image(
     - **prompt**: 图像描述文本
     - **image_base64**: 输入图片 (可选, base64 编码)
     - **model**: 使用的模型名称
-    - **number_of_images**: 生成图像数量
     - **aspect_ratio**: 宽高比 (可选)
-    - **image_size**: 图像尺寸 (可选，例如 "2K")
     - **person_generation**: 人体生成策略 (可选)
-    - **thinking_level**: 思考模式 (可选，例如 "HIGH")
+    
+    固定配置: image_size="1K", thinking_level="minimal"
     """
     has_image = body.image_base64 is not None
     logger.info(f"收到生成请求: prompt='{body.prompt[:50]}...', model={body.model}, has_image={has_image}")
     
     try:
         # 构建请求内容
-        parts = [types.Part.from_text(text=body.prompt)]
+        parts = []
         
-        # 如果有输入图片，添加图片 Part
+        # 如果有输入图片，先添加图片 Part
         if body.image_base64:
             # 解析 base64 数据 (支持 data:image/xxx;base64,xxx 格式)
             image_data = body.image_base64
+            mime_type = "image/jpeg"  # 默认 JPEG
+            
             if 'base64,' in image_data:
+                # 尝试从 data URI 中提取 mime_type
+                header = image_data.split('base64,')[0]
+                if 'image/png' in header:
+                    mime_type = "image/png"
+                elif 'image/webp' in header:
+                    mime_type = "image/webp"
                 image_data = image_data.split('base64,')[1]
             
             image_bytes = base64.b64decode(image_data)
             parts.append(
                 types.Part.from_bytes(
                     data=image_bytes,
-                    mime_type="image/jpeg"  # 默认 JPEG，也支持 PNG
+                    mime_type=mime_type
                 )
             )
+        
+        # 添加文本提示词
+        parts.append(types.Part.from_text(text=body.prompt))
         
         contents = [
             types.Content(
@@ -167,24 +175,20 @@ async def generate_image(
         ]
 
         # 配置生成参数
-        image_config_args = {}
+        image_config_args = {"image_size": "1K"}  # 固定为 1K
         if body.aspect_ratio:
             image_config_args["aspect_ratio"] = body.aspect_ratio
-        if body.image_size:
-            image_config_args["image_size"] = body.image_size
         if body.person_generation:
             image_config_args["person_generation"] = body.person_generation
             
-        config_args = {"response_modalities": ["IMAGE"]}
-        if image_config_args:
-            config_args["image_config"] = types.ImageConfig(**image_config_args)
-            
-        if body.thinking_level:
-            config_args["thinking_config"] = types.ThinkingConfig(thinking_level=body.thinking_level)
-
-        generate_content_config = types.GenerateContentConfig(**config_args)
+        generate_content_config = types.GenerateContentConfig(
+            response_modalities=["IMAGE", "TEXT"],
+            image_config=types.ImageConfig(**image_config_args),
+            thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),  # 固定为 minimal
+        )
 
         response_images = []
+        response_text_parts = []
         
         # 使用超时控制
         async with asyncio.timeout(settings.request_timeout_seconds):
@@ -195,29 +199,31 @@ async def generate_image(
             )
             
             async for chunk in stream:
-                if (
-                    chunk.candidates is None
-                    or not chunk.candidates
-                    or chunk.candidates[0].content is None
-                    or chunk.candidates[0].content.parts is None
-                ):
+                if chunk.parts is None:
                     continue
                 
-                for part in chunk.candidates[0].content.parts:
+                for part in chunk.parts:
                     if part.inline_data and part.inline_data.data:
+                        # 图像数据
                         b64_data = base64.b64encode(part.inline_data.data).decode('utf-8')
                         response_images.append(b64_data)
+                    elif part.text:
+                        # 文本数据
+                        response_text_parts.append(part.text)
 
         if not response_images:
             logger.warning("生成结果为空")
             raise HTTPException(status_code=500, detail="未生成任何图像")
 
-        logger.info(f"生成成功: {len(response_images)} 张图像")
-        return ImageResponse(images=response_images)
+        response_text = "".join(response_text_parts) if response_text_parts else None
+        logger.info(f"生成成功: {len(response_images)} 张图像, 文本: {bool(response_text)}")
+        return ImageResponse(images=response_images, text=response_text)
 
     except asyncio.TimeoutError:
         logger.error(f"请求超时: {settings.request_timeout_seconds}s")
         raise HTTPException(status_code=504, detail="请求超时")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"生成失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

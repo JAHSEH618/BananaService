@@ -61,9 +61,11 @@ Content-Type: `application/json`
 | :--- | :--- | :--- | :--- | :--- |
 | `prompt` | string | **是** | - | 图像生成的描述文本。 |
 | `image_base64` | string | 否 | null | 参考图片的 Base64 编码字符串。支持带前缀 (e.g., `data:image/jpeg;base64,...`) 或纯 Base64 串。 |
-| `model` | string | 否 | "gemini-3-pro-image-preview" | 使用的 Gemini 模型名称。 |
-| `aspect_ratio` | string | 否 | null | 图片宽高比 (如 "16:9", "1:1")。*注：当前代码逻辑中主要是透传给模型，具体支持取决于模型版本。* |
-| `number_of_images` | int | 否 | 1 | 希望生成的图片数量。 |
+| `model` | string | 否 | "gemini-3.1-flash-image-preview" | 使用的 Gemini 模型名称。 |
+| `aspect_ratio` | string | 否 | null | 图片宽高比 (如 "16:9", "1:1")，也可在 prompt 中通过自然语言指定。 |
+| `image_size` | string | 否 | null | 图像尺寸 (如 "1K", "2K")。 |
+| `person_generation` | string | 否 | null | 人体生成策略 (如 "ALLOW_ADULT")。 |
+| `thinking_level` | string | 否 | null | 思考模式 (如 "MINIMAL", "HIGH")。 |
 
 #### 请求示例
 
@@ -71,8 +73,7 @@ Content-Type: `application/json`
 
 ```json
 {
-  "prompt": "一只在太空漫步的赛博朋克风格猫咪",
-  "number_of_images": 1
+  "prompt": "一只在太空漫步的赛博朋克风格猫咪"
 }
 ```
 
@@ -82,7 +83,8 @@ Content-Type: `application/json`
 {
   "prompt": "基于这张草图生成的真实风格建筑渲染图",
   "image_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...",
-  "model": "gemini-3-pro-image-preview"
+  "thinking_level": "MINIMAL",
+  "image_size": "1K"
 }
 ```
 
@@ -95,6 +97,7 @@ HTTP Status Code: `200 OK`
   "images": [
     "iVBORw0KGgoAAAANSUhEUgAA..." 
   ],
+  "text": "这是模型生成的描述文本（如有）",
   "metadata": null
 }
 ```
@@ -102,6 +105,7 @@ HTTP Status Code: `200 OK`
 | 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
 | `images` | List[string] | 生成图片的 Base64 编码列表。 |
+| `text` | string \| null | 模型返回的文本内容（如有）。 |
 | `metadata` | dict \| null | 预留的元数据字段，目前返回 null。 |
 
 ---
