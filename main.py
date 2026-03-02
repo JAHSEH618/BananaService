@@ -71,9 +71,10 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 class GenerateImageRequest(BaseModel):
     prompt: str
     image_base64: Optional[str] = None  # 输入图片 (base64 编码)
-    model: str = "gemini-3-pro-image-preview"
+    model: str = "gemini-3.1-flash-image-preview"
     aspect_ratio: Optional[str] = None
     number_of_images: int = 1
+    person_generation: Optional[str] = None  # 例如 "ALLOW_ADULT"
 
 
 class ImageResponse(BaseModel):
@@ -130,6 +131,8 @@ async def generate_image(
     - **image_base64**: 输入图片 (可选, base64 编码)
     - **model**: 使用的模型名称
     - **number_of_images**: 生成图像数量
+    - **aspect_ratio**: 宽高比 (可选)
+    - **person_generation**: 人体生成策略 (可选)
     """
     has_image = body.image_base64 is not None
     logger.info(f"收到生成请求: prompt='{body.prompt[:50]}...', model={body.model}, has_image={has_image}")
@@ -161,10 +164,21 @@ async def generate_image(
         ]
 
         # 配置生成参数
-        generate_content_config = types.GenerateContentConfig(
-            response_modalities=["IMAGE"],
-            image_config=types.ImageConfig(image_size="1K") if "pro-image" in body.model else None
-        )
+        image_config_args = {"image_size": "1K"}  # 固定为 1K
+        if body.aspect_ratio:
+            image_config_args["aspect_ratio"] = body.aspect_ratio
+        if body.number_of_images and body.number_of_images > 0:
+            image_config_args["number_of_images"] = body.number_of_images
+        if body.person_generation:
+            image_config_args["person_generation"] = body.person_generation
+            
+        config_args = {"response_modalities": ["IMAGE"]}
+        if image_config_args:
+            config_args["image_config"] = types.ImageConfig(**image_config_args)
+            
+        config_args["thinking_config"] = types.ThinkingConfig(thinking_level="minimal")  # 固定为 minimal
+
+        generate_content_config = types.GenerateContentConfig(**config_args)
 
         response_images = []
         
