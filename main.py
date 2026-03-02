@@ -75,6 +75,7 @@ class GenerateImageRequest(BaseModel):
     aspect_ratio: Optional[str] = None
     number_of_images: int = 1
     person_generation: Optional[str] = None  # 例如 "ALLOW_ADULT"
+    thinking_level: Optional[str] = None  # 例如 "HIGH"
 
 
 class ImageResponse(BaseModel):
@@ -132,7 +133,9 @@ async def generate_image(
     - **model**: 使用的模型名称
     - **number_of_images**: 生成图像数量
     - **aspect_ratio**: 宽高比 (可选)
+    - **image_size**: 图像尺寸 (可选，例如 "2K")
     - **person_generation**: 人体生成策略 (可选)
+    - **thinking_level**: 思考模式 (可选，例如 "HIGH")
     """
     has_image = body.image_base64 is not None
     logger.info(f"收到生成请求: prompt='{body.prompt[:50]}...', model={body.model}, has_image={has_image}")
@@ -164,11 +167,11 @@ async def generate_image(
         ]
 
         # 配置生成参数
-        image_config_args = {"image_size": "1K"}  # 固定为 1K
+        image_config_args = {}
         if body.aspect_ratio:
             image_config_args["aspect_ratio"] = body.aspect_ratio
-        if body.number_of_images and body.number_of_images > 0:
-            image_config_args["number_of_images"] = body.number_of_images
+        if body.image_size:
+            image_config_args["image_size"] = body.image_size
         if body.person_generation:
             image_config_args["person_generation"] = body.person_generation
             
@@ -176,7 +179,8 @@ async def generate_image(
         if image_config_args:
             config_args["image_config"] = types.ImageConfig(**image_config_args)
             
-        config_args["thinking_config"] = types.ThinkingConfig(thinking_level="minimal")  # 固定为 minimal
+        if body.thinking_level:
+            config_args["thinking_config"] = types.ThinkingConfig(thinking_level=body.thinking_level)
 
         generate_content_config = types.GenerateContentConfig(**config_args)
 
