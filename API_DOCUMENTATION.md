@@ -97,6 +97,9 @@ HTTP Status Code: `200 OK`
   "images": [
     "iVBORw0KGgoAAAANSUhEUgAA..." 
   ],
+  "image_urls": [
+    "https://aipohto-lky.tos-ap-southeast-1.volces.com/generated/a1b2c3d4_20260209_114500.jpg"
+  ],
   "text": "这是模型生成的描述文本（如有）",
   "metadata": null
 }
@@ -105,6 +108,7 @@ HTTP Status Code: `200 OK`
 | 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
 | `images` | List[string] | 生成图片的 Base64 编码列表。 |
+| `image_urls` | List[string \| null] \| null | 上传至 TOS 后的公网 URL 列表。仅当 TOS 上传启用时返回，上传失败的图片对应位置为 null。 |
 | `text` | string \| null | 模型返回的文本内容（如有）。 |
 | `metadata` | dict \| null | 预留的元数据字段，目前返回 null。 |
 

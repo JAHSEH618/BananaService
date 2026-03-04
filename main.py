@@ -32,12 +32,13 @@ limiter = Limiter(key_func=get_remote_address)
 
 # ============ 全局客户端 ============
 _genai_client: Optional[genai.Client] = None
+_tos_http_client: Optional[httpx.AsyncClient] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理：启动时初始化，关闭时清理资源"""
-    global _genai_client
+    global _genai_client, _tos_http_client
     
     # 启动时初始化
     logger.info("正在初始化 Gemini 客户端...")
@@ -45,11 +46,23 @@ async def lifespan(app: FastAPI):
     # 初始化 Gemini 客户端 (SDK 内部管理连接池)
     _genai_client = genai.Client(api_key=settings.gemini_api_key)
     
+    # 初始化 TOS HTTP 客户端
+    if settings.tos_upload_enabled:
+        _tos_http_client = httpx.AsyncClient(
+            base_url=settings.tos_upload_url.rstrip('/'),
+            timeout=30.0,
+        )
+        logger.info(f"TOS 上传已启用 - URL: {settings.tos_upload_url}")
+    else:
+        logger.info("TOS 上传已禁用")
+    
     logger.info(f"服务已启动 - 超时: {settings.request_timeout_seconds}s, 速率限制: {settings.rate_limit_per_minute}/min")
     
     yield
     
     # 关闭时清理
+    if _tos_http_client:
+        await _tos_http_client.aclose()
     logger.info("服务已关闭")
 
 
@@ -77,6 +90,7 @@ class GenerateImageRequest(BaseModel):
 
 class ImageResponse(BaseModel):
     images: List[str]  # Base64 编码的图像列表
+    image_urls: Optional[List[Optional[str]]] = None  # TOS 公网 URL 列表
     text: Optional[str] = None  # 模型返回的文本 (如有)
     metadata: Optional[dict] = None
 
@@ -107,6 +121,75 @@ async def verify_api_key(x_api_key: str = Header(..., description="API 密钥"))
             headers={"WWW-Authenticate": "ApiKey"}
         )
     return x_api_key
+
+
+# ============ TOS 上传 ============
+async def upload_images_to_tos(base64_images: List[str], image_format: str = "jpeg") -> List[Optional[str]]:
+    """
+    将 base64 图片批量上传到 TOS，返回公网 URL 列表。
+    上传失败的位置返回 None。
+    """
+    if not _tos_http_client or not settings.tos_upload_enabled:
+        return [None] * len(base64_images)
+
+    # 使用批量上传接口（最多 10 张）
+    batch_items = [
+        {
+            "image_base64": img_b64,
+            "format": image_format,
+            "prefix": settings.tos_upload_prefix,
+            "quality": settings.tos_upload_quality,
+        }
+        for img_b64 in base64_images
+    ]
+
+    urls: List[Optional[str]] = []
+
+    # 分批处理（每批最多 10 张）
+    for i in range(0, len(batch_items), 10):
+        batch = batch_items[i:i + 10]
+
+        try:
+            if len(batch) == 1:
+                # 单张使用单独上传接口
+                resp = await _tos_http_client.post(
+                    "/api/v1/upload/base64",
+                    headers={"X-API-Key": settings.tos_api_key},
+                    json=batch[0],
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    if result.get("success"):
+                        urls.append(result["data"]["public_url"])
+                    else:
+                        logger.warning(f"TOS 上传失败: {result.get('message')}")
+                        urls.append(None)
+                else:
+                    logger.warning(f"TOS 上传 HTTP 错误: {resp.status_code}")
+                    urls.append(None)
+            else:
+                # 多张使用批量上传接口
+                resp = await _tos_http_client.post(
+                    "/api/v1/upload/batch",
+                    headers={"X-API-Key": settings.tos_api_key},
+                    json=batch,
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    if result.get("success") and isinstance(result.get("data"), list) and len(result["data"]) == len(batch):
+                        for item in result["data"]:
+                            urls.append(item.get("public_url"))
+                    else:
+                        logger.warning(f"TOS 批量上传失败或返回数量不匹配: {result.get('message')}")
+                        urls.extend([None] * len(batch))
+                else:
+                    logger.warning(f"TOS 批量上传 HTTP 错误: {resp.status_code}")
+                    urls.extend([None] * len(batch))
+        except Exception as e:
+            logger.error(f"TOS 上传第 {i // 10 + 1} 批异常: {e}")
+            urls.extend([None] * len(batch))
+
+    return urls
 
 
 # ============ API 端点 ============
@@ -190,18 +273,18 @@ async def generate_image(
         response_images = []
         response_text_parts = []
         
-        # 使用超时控制
+        # 使用超时控制（包含生成 + TOS 上传）
         async with asyncio.timeout(settings.request_timeout_seconds):
             stream = await _genai_client.aio.models.generate_content_stream(
                 model=body.model,
                 contents=contents,
                 config=generate_content_config,
             )
-            
+
             async for chunk in stream:
                 if chunk.parts is None:
                     continue
-                
+
                 for part in chunk.parts:
                     if part.inline_data and part.inline_data.data:
                         # 图像数据
@@ -211,13 +294,26 @@ async def generate_image(
                         # 文本数据
                         response_text_parts.append(part.text)
 
-        if not response_images:
-            logger.warning("生成结果为空")
-            raise HTTPException(status_code=500, detail="未生成任何图像")
+            if not response_images:
+                logger.warning("生成结果为空")
+                raise HTTPException(status_code=500, detail="未生成任何图像")
 
-        response_text = "".join(response_text_parts) if response_text_parts else None
-        logger.info(f"生成成功: {len(response_images)} 张图像, 文本: {bool(response_text)}")
-        return ImageResponse(images=response_images, text=response_text)
+            response_text = "".join(response_text_parts) if response_text_parts else None
+            logger.info(f"生成成功: {len(response_images)} 张图像, 文本: {bool(response_text)}")
+
+            # 上传到 TOS
+            image_urls = None
+            if settings.tos_upload_enabled:
+                logger.info(f"正在上传 {len(response_images)} 张图片到 TOS...")
+                image_urls = await upload_images_to_tos(response_images)
+                uploaded_count = sum(1 for u in image_urls if u is not None)
+                logger.info(f"TOS 上传完成: {uploaded_count}/{len(response_images)} 成功")
+
+            return ImageResponse(
+                images=response_images,
+                image_urls=image_urls,
+                text=response_text,
+            )
 
     except asyncio.TimeoutError:
         logger.error(f"请求超时: {settings.request_timeout_seconds}s")
