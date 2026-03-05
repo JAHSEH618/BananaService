@@ -7,7 +7,7 @@ from typing import List, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Header, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -91,6 +91,7 @@ class GenerateImageRequest(BaseModel):
 class ImageResponse(BaseModel):
     images: List[str]  # Base64 编码的图像列表
     image_urls: Optional[List[Optional[str]]] = None  # TOS 公网 URL 列表
+    proxy_urls: Optional[List[Optional[str]]] = None  # 后端代理 URL（供内网设备访问）
     text: Optional[str] = None  # 模型返回的文本 (如有)
     metadata: Optional[dict] = None
 
@@ -309,9 +310,18 @@ async def generate_image(
                 uploaded_count = sum(1 for u in image_urls if u is not None)
                 logger.info(f"TOS 上传完成: {uploaded_count}/{len(response_images)} 成功")
 
+            # 生成代理 URL（让 App 通过本服务下载，不直连 TOS）
+            proxy_urls = None
+            if image_urls:
+                proxy_urls = [
+                    f"/image-proxy?url={url}" if url else None
+                    for url in image_urls
+                ]
+
             return ImageResponse(
                 images=response_images,
                 image_urls=image_urls,
+                proxy_urls=proxy_urls,
                 text=response_text,
             )
 
@@ -323,6 +333,45 @@ async def generate_image(
     except Exception as e:
         logger.error(f"生成失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ 图片代理端点 ============
+@app.get("/image-proxy")
+async def image_proxy(
+    url: str,
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    图片代理下载端点：由后端从 TOS 下载图片后返回给客户端。
+    解决 Android 设备直连 TOS 东南亚节点 connection reset 的问题。
+    """
+    if not url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="无效的图片 URL")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"TOS 返回 HTTP {resp.status_code}"
+                )
+
+            content_type = resp.headers.get("content-type", "image/jpeg")
+            content = resp.content
+
+        logger.info(f"图片代理成功: {len(content)} bytes, url={url[:80]}")
+        return StreamingResponse(
+            iter([content]),
+            media_type=content_type,
+            headers={"Cache-Control": "public, max-age=86400"}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"图片代理失败: {e}, url={url[:80]}")
+        raise HTTPException(status_code=502, detail=f"图片代理失败: {str(e)}")
 
 
 if __name__ == "__main__":
