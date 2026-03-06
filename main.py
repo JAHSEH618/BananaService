@@ -1,19 +1,24 @@
 import asyncio
 import base64
+import io
 import logging
-import mimetypes
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import httpx
+import tos
 from fastapi import FastAPI, HTTPException, Request, Header, Depends
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from google import genai
 from google.genai import types
+from tos import TosClientV2
 
 from config import get_settings
 
@@ -32,13 +37,28 @@ limiter = Limiter(key_func=get_remote_address)
 
 # ============ 全局客户端 ============
 _genai_client: Optional[genai.Client] = None
-_tos_http_client: Optional[httpx.AsyncClient] = None
+_tos_client: Optional[TosClientV2] = None
+_tos_executor: Optional[ThreadPoolExecutor] = None
+
+_TOS_MIME_TYPES = {
+    "jpeg": "image/jpeg",
+    "jpg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
+}
+
+_TOS_FILE_EXTENSIONS = {
+    "jpeg": ".jpg",
+    "jpg": ".jpg",
+    "png": ".png",
+    "webp": ".webp",
+}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理：启动时初始化，关闭时清理资源"""
-    global _genai_client, _tos_http_client
+    global _genai_client, _tos_client, _tos_executor
     
     # 启动时初始化
     logger.info("正在初始化 Gemini 客户端...")
@@ -46,13 +66,36 @@ async def lifespan(app: FastAPI):
     # 初始化 Gemini 客户端 (SDK 内部管理连接池)
     _genai_client = genai.Client(api_key=settings.gemini_api_key)
     
-    # 初始化 TOS HTTP 客户端
+    # 初始化 TOS SDK 客户端
     if settings.tos_upload_enabled:
-        _tos_http_client = httpx.AsyncClient(
-            base_url=settings.tos_upload_url.rstrip('/'),
-            timeout=30.0,
+        required_fields = {
+            "tos_access_key": settings.tos_access_key,
+            "tos_secret_key": settings.tos_secret_key,
+            "tos_bucket_name": settings.tos_bucket_name,
+            "tos_public_domain": settings.tos_public_domain,
+        }
+        missing_fields = [key for key, value in required_fields.items() if not value]
+        if missing_fields:
+            raise RuntimeError(
+                f"TOS 上传已启用，但缺少必要配置: {', '.join(missing_fields)}"
+            )
+
+        _tos_client = TosClientV2(
+            ak=settings.tos_access_key,
+            sk=settings.tos_secret_key,
+            endpoint=settings.tos_endpoint,
+            region=settings.tos_region,
+            connection_time=60,
+            socket_timeout=30,
+            max_retry_count=3,
         )
-        logger.info(f"TOS 上传已启用 - URL: {settings.tos_upload_url}")
+        _tos_executor = ThreadPoolExecutor(max_workers=10, thread_name_prefix="banana_tos")
+        logger.info(
+            "TOS 上传已启用 - endpoint=%s, region=%s, bucket=%s",
+            settings.tos_endpoint,
+            settings.tos_region,
+            settings.tos_bucket_name,
+        )
     else:
         logger.info("TOS 上传已禁用")
     
@@ -61,8 +104,10 @@ async def lifespan(app: FastAPI):
     yield
     
     # 关闭时清理
-    if _tos_http_client:
-        await _tos_http_client.aclose()
+    if _tos_executor:
+        _tos_executor.shutdown(wait=True)
+        _tos_executor = None
+    _tos_client = None
     logger.info("服务已关闭")
 
 
@@ -125,72 +170,99 @@ async def verify_api_key(x_api_key: str = Header(..., description="API 密钥"))
 
 
 # ============ TOS 上传 ============
+def _normalize_image_format(image_format: str) -> str:
+    fmt = image_format.lower()
+    return fmt if fmt in _TOS_FILE_EXTENSIONS else "jpeg"
+
+
+def _strip_data_uri_prefix(image_base64: str) -> str:
+    if "base64," in image_base64:
+        return image_base64.split("base64,", 1)[1]
+    return image_base64
+
+
+def _generate_tos_object_key(prefix: str, image_format: str) -> str:
+    clean_prefix = prefix.strip()
+    if clean_prefix and not clean_prefix.endswith("/"):
+        clean_prefix = f"{clean_prefix}/"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:20]
+    unique_id = uuid.uuid4().hex[:12]
+    extension = _TOS_FILE_EXTENSIONS.get(image_format, ".jpg")
+    return f"{clean_prefix}{unique_id}_{timestamp}{extension}"
+
+
+def _upload_to_tos_sync(
+    client: TosClientV2,
+    bucket_name: str,
+    object_key: str,
+    image_bytes: bytes,
+    content_type: str,
+):
+    return client.put_object(
+        bucket=bucket_name,
+        key=object_key,
+        content=io.BytesIO(image_bytes),
+        content_type=content_type,
+        content_length=len(image_bytes),
+    )
+
+
+async def _upload_single_image_to_tos(base64_image: str, image_format: str) -> Optional[str]:
+    if not _tos_client or not _tos_executor:
+        return None
+
+    try:
+        image_bytes = base64.b64decode(_strip_data_uri_prefix(base64_image), validate=True)
+    except Exception as e:
+        logger.warning("Base64 解码失败，跳过上传: %s", e)
+        return None
+
+    object_key = _generate_tos_object_key(settings.tos_upload_prefix, image_format)
+    content_type = _TOS_MIME_TYPES.get(image_format, "image/jpeg")
+    loop = asyncio.get_running_loop()
+
+    try:
+        await loop.run_in_executor(
+            _tos_executor,
+            _upload_to_tos_sync,
+            _tos_client,
+            settings.tos_bucket_name,
+            object_key,
+            image_bytes,
+            content_type,
+        )
+        return f"https://{settings.tos_public_domain}/{object_key}"
+    except tos.exceptions.TosClientError as e:
+        logger.error("TOS Client 错误: key=%s, error=%s", object_key, e)
+        return None
+    except tos.exceptions.TosServerError as e:
+        logger.error(
+            "TOS Server 错误: key=%s, status=%s, code=%s, message=%s",
+            object_key,
+            e.status_code,
+            e.code,
+            e.message,
+        )
+        return None
+    except Exception as e:
+        logger.error("TOS 上传异常: key=%s, error=%s", object_key, e)
+        return None
+
+
 async def upload_images_to_tos(base64_images: List[str], image_format: str = "jpeg") -> List[Optional[str]]:
     """
     将 base64 图片批量上传到 TOS，返回公网 URL 列表。
     上传失败的位置返回 None。
     """
-    if not _tos_http_client or not settings.tos_upload_enabled:
+    if not _tos_client or not _tos_executor or not settings.tos_upload_enabled:
         return [None] * len(base64_images)
 
-    # 使用批量上传接口（最多 10 张）
-    batch_items = [
-        {
-            "image_base64": img_b64,
-            "format": image_format,
-            "prefix": settings.tos_upload_prefix,
-            "quality": settings.tos_upload_quality,
-        }
+    normalized_format = _normalize_image_format(image_format)
+    upload_tasks = [
+        _upload_single_image_to_tos(img_b64, normalized_format)
         for img_b64 in base64_images
     ]
-
-    urls: List[Optional[str]] = []
-
-    # 分批处理（每批最多 10 张）
-    for i in range(0, len(batch_items), 10):
-        batch = batch_items[i:i + 10]
-
-        try:
-            if len(batch) == 1:
-                # 单张使用单独上传接口
-                resp = await _tos_http_client.post(
-                    "/api/v1/upload/base64",
-                    headers={"X-API-Key": settings.tos_api_key},
-                    json=batch[0],
-                )
-                if resp.status_code == 200:
-                    result = resp.json()
-                    if result.get("success"):
-                        urls.append(result["data"]["public_url"])
-                    else:
-                        logger.warning(f"TOS 上传失败: {result.get('message')}")
-                        urls.append(None)
-                else:
-                    logger.warning(f"TOS 上传 HTTP 错误: {resp.status_code}")
-                    urls.append(None)
-            else:
-                # 多张使用批量上传接口
-                resp = await _tos_http_client.post(
-                    "/api/v1/upload/batch",
-                    headers={"X-API-Key": settings.tos_api_key},
-                    json=batch,
-                )
-                if resp.status_code == 200:
-                    result = resp.json()
-                    if result.get("success") and isinstance(result.get("data"), list) and len(result["data"]) == len(batch):
-                        for item in result["data"]:
-                            urls.append(item.get("public_url"))
-                    else:
-                        logger.warning(f"TOS 批量上传失败或返回数量不匹配: {result.get('message')}")
-                        urls.extend([None] * len(batch))
-                else:
-                    logger.warning(f"TOS 批量上传 HTTP 错误: {resp.status_code}")
-                    urls.extend([None] * len(batch))
-        except Exception as e:
-            logger.error(f"TOS 上传第 {i // 10 + 1} 批异常: {e}")
-            urls.extend([None] * len(batch))
-
-    return urls
+    return await asyncio.gather(*upload_tasks)
 
 
 # ============ API 端点 ============

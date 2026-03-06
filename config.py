@@ -19,12 +19,15 @@ class Settings(BaseSettings):
     # 速率限制
     rate_limit_per_minute: int = 60  # 每分钟最大请求数
     
-    # TOS Upload Service
+    # TOS 直传配置
     tos_upload_enabled: bool = False  # 是否启用 TOS 上传
-    tos_upload_url: str = "http://101.47.158.162:10086"  # TOS Upload Service 地址
-    tos_api_key: str = ""  # TOS Upload Service 的 API Key
+    tos_region: str = "ap-southeast-1"
+    tos_endpoint: str = "tos-ap-southeast-1.volces.com"
+    tos_bucket_name: str = "aipohto-lky"
+    tos_access_key: str = ""
+    tos_secret_key: str = ""
+    tos_public_domain: str = "aipohto-lky.tos-ap-southeast-1.volces.com"
     tos_upload_prefix: str = "generated/"  # TOS 存储路径前缀
-    tos_upload_quality: int = 90  # 上传图片压缩质量 1-100
     
     # 服务配置
     host: str = "0.0.0.0"
