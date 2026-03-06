@@ -55,6 +55,41 @@ _TOS_FILE_EXTENSIONS = {
 }
 
 
+def _build_tos_client() -> TosClientV2:
+    """
+    兼容不同 tos SDK 版本的构造参数差异。
+    """
+    base_kwargs = {
+        "ak": settings.tos_access_key,
+        "sk": settings.tos_secret_key,
+        "endpoint": settings.tos_endpoint,
+        "region": settings.tos_region,
+    }
+    preferred_kwargs = {
+        "connection_time": 60,
+        "socket_timeout": 30,
+        "max_retry_count": 3,
+    }
+
+    try:
+        return TosClientV2(**base_kwargs, **preferred_kwargs)
+    except TypeError as e:
+        logger.warning(
+            "当前 tos SDK 不支持部分高级参数，已降级为基础初始化: %s",
+            e,
+        )
+
+    try:
+        return TosClientV2(**base_kwargs, max_retry_count=3)
+    except TypeError as e:
+        logger.warning(
+            "当前 tos SDK 不支持 max_retry_count，继续降级: %s",
+            e,
+        )
+
+    return TosClientV2(**base_kwargs)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理：启动时初始化，关闭时清理资源"""
@@ -80,15 +115,7 @@ async def lifespan(app: FastAPI):
                 f"TOS 上传已启用，但缺少必要配置: {', '.join(missing_fields)}"
             )
 
-        _tos_client = TosClientV2(
-            ak=settings.tos_access_key,
-            sk=settings.tos_secret_key,
-            endpoint=settings.tos_endpoint,
-            region=settings.tos_region,
-            connection_time=60,
-            socket_timeout=30,
-            max_retry_count=3,
-        )
+        _tos_client = _build_tos_client()
         _tos_executor = ThreadPoolExecutor(max_workers=10, thread_name_prefix="banana_tos")
         logger.info(
             "TOS 上传已启用 - endpoint=%s, region=%s, bucket=%s",
