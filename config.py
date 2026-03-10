@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     tos_public_domain: str = "aipohto-lky.tos-ap-southeast-1.volces.com"
     tos_upload_prefix: str = "generated/"  # TOS 存储路径前缀
     
+    # 本地图片存储
+    image_storage_dir: str = "generated_images"  # 生成图片的本地存储目录
+    image_retention_hours: int = 24  # 本地图片保留时间（小时）
+
     # 服务配置
     host: str = "0.0.0.0"
     port: int = 8000

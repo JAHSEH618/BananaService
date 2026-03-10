@@ -11,8 +11,13 @@ services:
       - .env
     environment:
       - WORKERS=4
+    volumes:
+      - image_data:/app/generated_images
     deploy:
       resources:
         limits:
           cpus: '1.0'
           memory: 1G
+
+volumes:
+  image_data:

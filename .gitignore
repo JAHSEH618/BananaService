@@ -43,3 +43,6 @@ logs/
 
 # Runtime
 .pid
+
+# Generated images (local cache)
+generated_images/
