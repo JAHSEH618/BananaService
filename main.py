@@ -12,6 +12,7 @@ from typing import List, Optional
 
 import httpx
 import tos
+from PIL import Image
 from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -107,13 +108,25 @@ def _build_tos_client() -> TosClientV2:
 
 # ============ 本地图片存储 ============
 def _save_raw_image_to_local(raw_bytes: bytes) -> Optional[str]:
-    """将原始图片字节直接写入本地磁盘，返回文件名。零 base64 开销。"""
+    """将原始图片字节保存到本地磁盘，PNG/WebP 自动转为 JPEG 以大幅缩减体积。"""
     try:
         fmt = _detect_image_format(raw_bytes)
-        ext = _FILE_EXTENSIONS.get(fmt, ".jpg")
-        filename = f"{uuid.uuid4().hex}{ext}"
-        filepath = IMAGE_STORAGE_DIR / filename
-        filepath.write_bytes(raw_bytes)
+        if fmt in ("png", "webp"):
+            # PNG/WebP → JPEG: 对于摄影类图片，体积从 2-5MB 降至 200-500KB
+            img = Image.open(io.BytesIO(raw_bytes))
+            if img.mode in ("RGBA", "P", "LA"):
+                img = img.convert("RGB")
+            filename = f"{uuid.uuid4().hex}.jpg"
+            filepath = IMAGE_STORAGE_DIR / filename
+            img.save(filepath, format="JPEG", quality=90, optimize=True)
+            orig_kb = len(raw_bytes) / 1024
+            new_kb = filepath.stat().st_size / 1024
+            logger.info(f"PNG/WebP→JPEG 转换: {orig_kb:.0f}KB → {new_kb:.0f}KB ({new_kb/orig_kb*100:.0f}%)")
+        else:
+            # JPEG 直写，无额外开销
+            filename = f"{uuid.uuid4().hex}.jpg"
+            filepath = IMAGE_STORAGE_DIR / filename
+            filepath.write_bytes(raw_bytes)
         return filename
     except Exception as e:
         logger.error(f"保存图片到本地失败: {e}")
