@@ -13,7 +13,7 @@ from typing import List, Optional
 import httpx
 import tos
 from PIL import Image
-from fastapi import FastAPI, HTTPException, Request, Header, Depends
+from fastapi import FastAPI, File, Form, HTTPException, Request, Header, Depends, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -353,52 +353,34 @@ async def health_check():
     return HealthResponse(status="healthy", version="1.2.0")
 
 
-@app.post("/generate", response_model=ImageResponse)
-@limiter.limit(f"{settings.rate_limit_per_minute}/minute")
-async def generate_image(
-    request: Request,
-    body: GenerateImageRequest,
-    api_key: str = Depends(verify_api_key)
-):
-    """
-    生成图像接口。
-
-    优化点：
-    - 使用 raw bytes 全程传递，零 base64 编解码开销用于磁盘存储
-    - TOS 上传为 fire-and-forget 后台任务，不阻塞响应
-    - include_base64=False 时跳过 base64 编码，大幅缩减响应体积
-    """
-    has_image = body.image_base64 is not None
-    logger.info(f"收到生成请求: prompt='{body.prompt[:50]}...', model={body.model}, has_image={has_image}")
+async def _do_generate(
+    *,
+    prompt: str,
+    model: str,
+    image_bytes: Optional[bytes] = None,
+    mime_type: str = "image/jpeg",
+    aspect_ratio: Optional[str] = None,
+    person_generation: Optional[str] = None,
+    include_base64: bool = False,
+) -> ImageResponse:
+    """核心生图逻辑，供 /generate 和 /generate-multipart 共用。"""
+    has_image = image_bytes is not None
+    logger.info(f"收到生成请求: prompt='{prompt[:50]}...', model={model}, has_image={has_image}")
 
     try:
-        # 构建请求内容
         parts = []
 
-        if body.image_base64:
-            image_data = body.image_base64
-            mime_type = "image/jpeg"
-
-            if 'base64,' in image_data:
-                header = image_data.split('base64,')[0]
-                if 'image/png' in header:
-                    mime_type = "image/png"
-                elif 'image/webp' in header:
-                    mime_type = "image/webp"
-                image_data = image_data.split('base64,')[1]
-
-            image_bytes = base64.b64decode(image_data)
+        if image_bytes:
             parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
 
-        parts.append(types.Part.from_text(text=body.prompt))
-
+        parts.append(types.Part.from_text(text=prompt))
         contents = [types.Content(role="user", parts=parts)]
 
         image_config_args = {"image_size": "1K"}
-        if body.aspect_ratio:
-            image_config_args["aspect_ratio"] = body.aspect_ratio
-        if body.person_generation:
-            image_config_args["person_generation"] = body.person_generation
+        if aspect_ratio:
+            image_config_args["aspect_ratio"] = aspect_ratio
+        if person_generation:
+            image_config_args["person_generation"] = person_generation
 
         generate_content_config = types.GenerateContentConfig(
             response_modalities=["IMAGE", "TEXT"],
@@ -412,7 +394,7 @@ async def generate_image(
 
         async with asyncio.timeout(settings.request_timeout_seconds):
             stream = await _genai_client.aio.models.generate_content_stream(
-                model=body.model,
+                model=model,
                 contents=contents,
                 config=generate_content_config,
             )
@@ -443,17 +425,16 @@ async def generate_image(
             asyncio.create_task(_background_upload_to_tos(response_raw_images))
 
         # 3. 仅在客户端明确需要时才做 base64 编码
-        #    如果本地存储全部失败，则无论 include_base64 设置如何，都返回 base64 作为兜底
         images_b64 = None
         if not local_urls:
             logger.error("本地存储全部失败，返回 base64 兜底")
             images_b64 = [base64.b64encode(raw).decode('utf-8') for raw in response_raw_images]
-        elif body.include_base64:
+        elif include_base64:
             images_b64 = [base64.b64encode(raw).decode('utf-8') for raw in response_raw_images]
 
         return ImageResponse(
             images=images_b64,
-            image_urls=None,  # TOS 异步上传中，URL 尚不可用
+            image_urls=None,
             proxy_urls=local_urls if local_urls else None,
             text=response_text,
         )
@@ -466,6 +447,70 @@ async def generate_image(
     except Exception as e:
         logger.error(f"生成失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generate", response_model=ImageResponse)
+@limiter.limit(f"{settings.rate_limit_per_minute}/minute")
+async def generate_image(
+    request: Request,
+    body: GenerateImageRequest,
+    api_key: str = Depends(verify_api_key)
+):
+    """生成图像接口（JSON + base64 方式，保留向后兼容）。"""
+    image_bytes = None
+    mime_type = "image/jpeg"
+
+    if body.image_base64:
+        image_data = body.image_base64
+        if 'base64,' in image_data:
+            header = image_data.split('base64,')[0]
+            if 'image/png' in header:
+                mime_type = "image/png"
+            elif 'image/webp' in header:
+                mime_type = "image/webp"
+            image_data = image_data.split('base64,')[1]
+        image_bytes = base64.b64decode(image_data)
+
+    return await _do_generate(
+        prompt=body.prompt,
+        model=body.model,
+        image_bytes=image_bytes,
+        mime_type=mime_type,
+        aspect_ratio=body.aspect_ratio,
+        person_generation=body.person_generation,
+        include_base64=body.include_base64,
+    )
+
+
+@app.post("/generate-multipart", response_model=ImageResponse)
+@limiter.limit(f"{settings.rate_limit_per_minute}/minute")
+async def generate_image_multipart(
+    request: Request,
+    prompt: str = Form(...),
+    model: str = Form("gemini-3.1-flash-image-preview"),
+    aspect_ratio: Optional[str] = Form(None),
+    person_generation: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    api_key: str = Depends(verify_api_key),
+):
+    """生成图像接口（multipart 方式，避免 base64 编码膨胀 33%）。"""
+    image_bytes = None
+    mime_type = "image/jpeg"
+
+    if image:
+        image_bytes = await image.read()
+        if image.content_type:
+            mime_type = image.content_type
+
+    return await _do_generate(
+        prompt=prompt,
+        model=model,
+        image_bytes=image_bytes,
+        mime_type=mime_type,
+        aspect_ratio=aspect_ratio,
+        person_generation=person_generation,
+        include_base64=False,
+    )
 
 
 # ============ 本地图片服务端点 ============
