@@ -562,8 +562,9 @@ async def generate_image_multipart_stream(
 
     async def event_stream():
         try:
-            # 阶段 1：已收到请求
+            # 阶段 1：已收到请求 — 立即 flush 给客户端
             yield _sse_event("received", 5, "Request received")
+            await asyncio.sleep(0)
 
             # 阶段 2：预处理
             parts = []
@@ -585,33 +586,49 @@ async def generate_image_multipart_stream(
             )
 
             yield _sse_event("preprocessing", 15, "Preparing image")
+            await asyncio.sleep(0)
 
             # 阶段 3：调用 Gemini API（主要耗时阶段）
             yield _sse_event("generating", 20, "AI is creating your photo")
+            await asyncio.sleep(0)
 
+            # ---- 核心改动：将 Gemini 调用放入 Task，主循环发心跳 ----
             response_raw_images: List[bytes] = []
             response_text_parts: List[str] = []
 
-            async with asyncio.timeout(settings.request_timeout_seconds):
-                stream = await _genai_client.aio.models.generate_content_stream(
-                    model=model,
-                    contents=contents,
-                    config=generate_content_config,
-                )
+            async def _call_gemini():
+                """在独立 Task 中收集 Gemini 流式结果"""
+                async with asyncio.timeout(settings.request_timeout_seconds):
+                    stream = await _genai_client.aio.models.generate_content_stream(
+                        model=model,
+                        contents=contents,
+                        config=generate_content_config,
+                    )
+                    async for chunk in stream:
+                        if chunk.parts is None:
+                            continue
+                        for part in chunk.parts:
+                            if part.inline_data and part.inline_data.data:
+                                response_raw_images.append(part.inline_data.data)
+                            elif part.text:
+                                response_text_parts.append(part.text)
 
-                chunk_count = 0
-                async for chunk in stream:
-                    if chunk.parts is None:
-                        continue
-                    for part in chunk.parts:
-                        if part.inline_data and part.inline_data.data:
-                            response_raw_images.append(part.inline_data.data)
-                        elif part.text:
-                            response_text_parts.append(part.text)
-                    chunk_count += 1
-                    # 在 20-80 之间递增，每收到一个 chunk 推进一点
-                    gen_progress = min(80, 20 + chunk_count * 10)
-                    yield _sse_event("generating", gen_progress, "AI is creating your photo")
+            gemini_task = asyncio.create_task(_call_gemini())
+
+            # 每 2s 发送心跳进度（20% → 80% 缓慢递增）
+            heartbeat_progress = 20
+            while not gemini_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(gemini_task), timeout=2.0)
+                except asyncio.TimeoutError:
+                    # Gemini 还没完成，推送心跳
+                    heartbeat_progress = min(80, heartbeat_progress + 5)
+                    yield _sse_event("generating", heartbeat_progress, "AI is creating your photo")
+                    await asyncio.sleep(0)
+
+            # 检查 Gemini Task 是否抛出异常
+            if gemini_task.exception() is not None:
+                raise gemini_task.exception()
 
             if not response_raw_images:
                 logger.warning("[SSE] 生成结果为空")
@@ -623,6 +640,7 @@ async def generate_image_multipart_stream(
 
             # 阶段 4：后处理（保存到本地）
             yield _sse_event("processing", 85, "Finalizing image")
+            await asyncio.sleep(0)
 
             local_filenames = await _save_raw_images_to_local(response_raw_images)
             local_urls = [f"/images/{fn}" for fn in local_filenames if fn is not None]
