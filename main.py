@@ -257,9 +257,22 @@ async def lifespan(app: FastAPI):
     # 启动时清理过期图片
     _cleanup_old_images()
 
-    # 初始化 Gemini 客户端
+    # 初始化 Gemini 客户端（配置连接池参数）
     logger.info("正在初始化 Gemini 客户端...")
-    _genai_client = genai.Client(api_key=settings.gemini_api_key)
+    _genai_client = genai.Client(
+        api_key=settings.gemini_api_key,
+        http_options={
+            "timeout": settings.request_timeout_seconds * 1000,  # 毫秒
+        },
+    )
+
+    # 预热：发送轻量请求建立 TCP/TLS 连接，避免首次用户请求的冷启动延迟
+    try:
+        logger.info("正在预热 Gemini API 连接...")
+        _warmup_model = await _genai_client.aio.models.get(model="gemini-3.1-flash-image-preview")
+        logger.info(f"Gemini 连接预热完成: {_warmup_model.name}")
+    except Exception as e:
+        logger.warning(f"Gemini 连接预热失败（不影响服务启动）: {e}")
 
     # 初始化 TOS SDK 客户端
     if settings.tos_upload_enabled:
