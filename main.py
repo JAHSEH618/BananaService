@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import json
 import logging
 import time
 import uuid
@@ -523,6 +524,145 @@ async def generate_image_multipart(
         aspect_ratio=aspect_ratio,
         person_generation=person_generation,
         include_base64=False,
+    )
+
+
+# ============ SSE 辅助函数 ============
+def _sse_event(stage: str, progress: int, message: str = "", result: dict = None) -> str:
+    """构造一条 SSE data 行"""
+    payload = {"stage": stage, "progress": progress, "message": message}
+    if result is not None:
+        payload["result"] = result
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+# ============ SSE 流式生图端点 ============
+@app.post("/generate-multipart-stream")
+@limiter.limit(f"{settings.rate_limit_per_minute}/minute")
+async def generate_image_multipart_stream(
+    request: Request,
+    prompt: str = Form(...),
+    model: str = Form("gemini-3.1-flash-image-preview"),
+    aspect_ratio: Optional[str] = Form(None),
+    person_generation: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    api_key: str = Depends(verify_api_key),
+):
+    """SSE 流式生图接口：分阶段推送进度，最终推送生成结果。"""
+    image_bytes = None
+    mime_type = "image/jpeg"
+
+    if image:
+        image_bytes = await image.read()
+        if image.content_type:
+            mime_type = image.content_type
+
+    has_image = image_bytes is not None
+    logger.info(f"[SSE] 收到生成请求: prompt='{prompt[:50]}...', model={model}, has_image={has_image}")
+
+    async def event_stream():
+        try:
+            # 阶段 1：已收到请求
+            yield _sse_event("received", 5, "Request received")
+
+            # 阶段 2：预处理
+            parts = []
+            if image_bytes:
+                parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+            parts.append(types.Part.from_text(text=prompt))
+            contents = [types.Content(role="user", parts=parts)]
+
+            image_config_args = {"image_size": "1K"}
+            if aspect_ratio:
+                image_config_args["aspect_ratio"] = aspect_ratio
+            if person_generation:
+                image_config_args["person_generation"] = person_generation
+
+            generate_content_config = types.GenerateContentConfig(
+                response_modalities=["IMAGE", "TEXT"],
+                image_config=types.ImageConfig(**image_config_args),
+                thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
+            )
+
+            yield _sse_event("preprocessing", 15, "Preparing image")
+
+            # 阶段 3：调用 Gemini API（主要耗时阶段）
+            yield _sse_event("generating", 20, "AI is creating your photo")
+
+            response_raw_images: List[bytes] = []
+            response_text_parts: List[str] = []
+
+            async with asyncio.timeout(settings.request_timeout_seconds):
+                stream = await _genai_client.aio.models.generate_content_stream(
+                    model=model,
+                    contents=contents,
+                    config=generate_content_config,
+                )
+
+                chunk_count = 0
+                async for chunk in stream:
+                    if chunk.parts is None:
+                        continue
+                    for part in chunk.parts:
+                        if part.inline_data and part.inline_data.data:
+                            response_raw_images.append(part.inline_data.data)
+                        elif part.text:
+                            response_text_parts.append(part.text)
+                    chunk_count += 1
+                    # 在 20-80 之间递增，每收到一个 chunk 推进一点
+                    gen_progress = min(80, 20 + chunk_count * 10)
+                    yield _sse_event("generating", gen_progress, "AI is creating your photo")
+
+            if not response_raw_images:
+                logger.warning("[SSE] 生成结果为空")
+                yield _sse_event("error", 0, "No images generated")
+                return
+
+            response_text = "".join(response_text_parts) if response_text_parts else None
+            logger.info(f"[SSE] 生成成功: {len(response_raw_images)} 张图像, 文本: {bool(response_text)}")
+
+            # 阶段 4：后处理（保存到本地）
+            yield _sse_event("processing", 85, "Finalizing image")
+
+            local_filenames = await _save_raw_images_to_local(response_raw_images)
+            local_urls = [f"/images/{fn}" for fn in local_filenames if fn is not None]
+            logger.info(f"[SSE] 本地存储: {len(local_urls)}/{len(response_raw_images)} 成功")
+
+            # TOS 上传：fire-and-forget
+            if settings.tos_upload_enabled:
+                asyncio.create_task(_background_upload_to_tos(response_raw_images))
+
+            # 兜底 base64
+            images_b64 = None
+            if not local_urls:
+                logger.error("[SSE] 本地存储全部失败，返回 base64 兜底")
+                images_b64 = [base64.b64encode(raw).decode('utf-8') for raw in response_raw_images]
+
+            # 阶段 5：完成，推送最终结果
+            result_payload = {
+                "images": images_b64,
+                "image_urls": None,
+                "proxy_urls": local_urls if local_urls else None,
+                "text": response_text,
+                "metadata": None,
+            }
+            yield _sse_event("done", 100, "Done", result=result_payload)
+
+        except asyncio.TimeoutError:
+            logger.error(f"[SSE] 请求超时: {settings.request_timeout_seconds}s")
+            yield _sse_event("error", 0, "Request timed out")
+        except Exception as e:
+            logger.error(f"[SSE] 生成失败: {e}")
+            yield _sse_event("error", 0, str(e))
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
